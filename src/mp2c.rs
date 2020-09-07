@@ -1,8 +1,11 @@
 use std::iter::Iterator;
 use std::error::Error;
+use std::thread;
+use std::sync::mpsc::{channel, Receiver, Sender};
 
 /// `Event` is an enum that offers various type of events that will be 
 /// handled by an mp2c carousel.
+#[derive(Debug, Copy, Clone)]
 pub enum Event {
   Message(Vec<u8>),
   Terminate,
@@ -13,48 +16,10 @@ pub enum Event {
 ///
 /// An iterable reader is a type that implements `Iterator` and
 /// `Counter`.
-struct Store<T: Counter + Iterator> {
+struct Store {
   size: usize,
   data: Vec<Event>,
   tail: usize,
-  pollers: Vec<T>,
-}
-
-impl<T: Counter + Iterator> Store<T>{
-
-  fn new(size: usize, pollers: Vec<T>) -> Self {
-    Store {
-      size,
-      data: Vec::with_capacity(size),
-      tail: 0,
-      pollers
-    }
-  }
-
-  /// Returns the head of this ring buffer.
-  fn head(&self) -> usize {
-    self.pollers.iter().map(|x| x.count()).min().unwrap_or(0)
-  }
-
-  /// Returns if the ring buffer is empty or not.
-  fn is_empty(&self) -> bool {
-    self.tail == self.head()
-  }
-
-  /// Returns if the ring buffer is full or not.
-  fn is_full(&self) -> bool {
-    (self.tail % self.size) + 1 == self.head()
-  }
-
-  fn add(&mut self, event: Event) -> Result<(), String> {
-    if self.is_full() {
-      return Err(String::from("waiting for readers to finish reading"));
-    }
-    self.data[self.tail] = event;
-    self.tail = (self.tail + 1) % self.size;
-
-    Ok(())
-  }
 }
 
 /// `Counter` indicates the index till where a consumer has polled
@@ -75,6 +40,7 @@ pub trait Consumer {
 struct Poller<T: Consumer> {
   count: usize,
   consumer: T,
+  rx: Receiver<Event>,
 }
 
 impl<T: Consumer> Counter for Poller<T> {
@@ -85,16 +51,94 @@ impl<T: Consumer> Counter for Poller<T> {
 
 impl<T: Consumer> Poller<T> {
   fn start(&self) {
-
+    //@TODO: implement me.
   }
 }
 
-pub struct Carousel {
+/// `Carousel` is the core data structure that represents a multi-producer multi-polling consumer
+/// async `Event` delivery system.
+pub struct Carousel<T: Consumer> {
+  store: Store,
+  pollers: Vec<Poller<T>>,
+  tx: Sender<Event>,
 }
 
-impl Carousel {
-  pub fn new() -> Self {
-    Carousel {
+impl<T: Consumer> Carousel<T>{
+
+  pub fn new(size: usize, consumers: Vec<T>) -> Self {
+    let mut txs = Vec::<Sender<Event>>::new();
+    let pollers: Vec<Poller<T>> = consumers.
+        map(|consumer| {
+          let (tx, rx) = channel::<Event>();
+
+          txs.push(tx);
+
+          let p = Poller{count: 0, consumer, rx};
+
+          p.start();
+
+          p
+        }).
+        collect();
+
+    let store = Store {
+      size,
+      data: Vec::<Event>::with_capacity(size),
+      tail: 0,
+    };
+
+    let (tx, rx) = channel::<Event>();
+
+    let mut c = Carousel {
+      store,
+      pollers,
+      tx,
+    };
+
+    thread::spawn(move|| {
+      let e = rx.recv().unwrap();
+
+      txs.for_each(|tx| {
+        let ce = e;
+        tx.send(ce).unwrap();
+      });
+
+      c.add(e);
+    });
+
+    c
+  }
+
+  /// Returns the head of this ring buffer.
+  fn head(&self) -> usize {
+    self.pollers.iter().map(|x| x.count()).min().unwrap_or(0)
+  }
+
+  /// Returns if the ring buffer is empty or not.
+  fn is_empty(&self) -> bool {
+    self.store.tail == self.head()
+  }
+
+  /// Returns if the ring buffer is full or not.
+  fn is_full(&self) -> bool {
+    (self.store.tail % self.store.size) + 1 == self.head()
+  }
+
+  fn add(&mut self, event: Event) -> Result<(), String> {
+    if self.is_full() {
+      return Err(String::from("waiting for readers to finish reading"));
+    }
+    self.store.data[self.store.tail] = event;
+    self.store.tail = (self.store.tail + 1) % self.store.size;
+
+    Ok(())
+  }
+
+  /// Queues an item on the carousel to be polled by the consumers.
+  pub fn queue(&self, event: Event) -> Result<(), String> {
+    return match self.tx.send(event) {
+      Err(e) => Err(String::from(e.to_string())),
+      _ => Ok(()),
     }
   }
 }
