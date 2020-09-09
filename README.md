@@ -1,7 +1,7 @@
 # mp2c
 Multi producer multi polling consumer
 
-_*_Note: work in progress**** 
+_Note: work in progress_
 
 # What is mp2c?
 MP2C is a data structure that enables multiple producers/publishers/writers/senders to send messages to multiple consumers/subscribers/readers/receivers.
