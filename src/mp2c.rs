@@ -1,11 +1,10 @@
 use std::iter::Iterator;
-use std::error::Error;
 use std::thread;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 /// `Event` is an enum that offers various type of events that will be 
 /// handled by an mp2c carousel.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub enum Event {
   Message(Vec<u8>),
   Terminate,
@@ -30,7 +29,7 @@ trait Counter {
 
 /// `Consumer` enables to implement handling logic for a vector of bytes.
 pub trait Consumer {
-  fn consume(&self, Event);
+  fn consume(&self, data: Vec<u8>);
 }
 
 /// `Poller` is a simple struct that encapsulates a polling thread that calls
@@ -50,8 +49,20 @@ impl<T: Consumer> Counter for Poller<T> {
 }
 
 impl<T: Consumer> Poller<T> {
-  fn start(&self) {
+  fn start(&mut self) {
     //@TODO: implement me.
+
+    loop {
+      let event = self.rx.recv().unwrap();
+
+      match event {
+        Event::Message(data) => {
+          self.consumer.consume(data);
+          self.count += 1;
+        },
+        _ => (),
+      }
+    }
   }
 }
 
@@ -61,19 +72,22 @@ pub struct Carousel<T: Consumer> {
   store: Store,
   pollers: Vec<Poller<T>>,
   tx: Sender<Event>,
+  rx: Receiver<Event>,
+  consumer_txs: Vec<Sender<Event>>
 }
 
-impl<T: Consumer> Carousel<T>{
+impl<T: Consumer + Send + 'static> Carousel<T>{
 
   pub fn new(size: usize, consumers: Vec<T>) -> Self {
-    let mut txs = Vec::<Sender<Event>>::new();
-    let pollers: Vec<Poller<T>> = consumers.
+    let mut consumer_txs = Vec::<Sender<Event>>::new();
+
+    let pollers: Vec<Poller<T>> = consumers.into_iter().
         map(|consumer| {
           let (tx, rx) = channel::<Event>();
 
-          txs.push(tx);
+          consumer_txs.push(tx);
 
-          let p = Poller{count: 0, consumer, rx};
+          let mut p = Poller{count: 0, consumer, rx};
 
           p.start();
 
@@ -93,20 +107,28 @@ impl<T: Consumer> Carousel<T>{
       store,
       pollers,
       tx,
+      rx,
+      consumer_txs,
     };
 
-    thread::spawn(move|| {
-      let e = rx.recv().unwrap();
-
-      txs.for_each(|tx| {
-        let ce = e;
-        tx.send(ce).unwrap();
-      });
-
-      c.add(e);
-    });
+    c.start();
 
     c
+  }
+
+  fn start(&mut self) {
+    thread::spawn(|| {
+      loop {
+        let e = self.rx.recv().unwrap();
+
+        self.add(e);
+
+        self.consumer_txs.into_iter().for_each(|tx| {
+          let ce = e.clone();
+          tx.send(ce).unwrap();
+        });
+      }
+    });
   }
 
   /// Returns the head of this ring buffer.
@@ -145,21 +167,22 @@ impl<T: Consumer> Carousel<T>{
 
 #[cfg(test)]
 mod tests {
+  use crate::mp2c::{Consumer, Carousel, Event};
 
   struct TestConsumer {
 
   }
 
-  impl Iterator for TestPoller {
-    type Item = String;
-
-    fn next(&mut self) -> Option<Self::Item> {
-      unimplemented!()
+  impl Consumer for TestConsumer {
+    fn consume(&self, data: Vec<u8>) {
+      println!("{}",String::from_utf8(data).unwrap());
     }
   }
 
   #[test]
   fn basic() {
-    let 
+    let c = Carousel::new(5, vec![TestConsumer{}]);
+
+    c.queue(Event::Message(String::from("test").into_bytes())).unwrap();
   }
 }
