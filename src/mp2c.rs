@@ -1,30 +1,15 @@
-use std::iter::Iterator;
+use std::sync;
+use std::sync::mpsc;
 use std::thread;
-use std::sync::mpsc::{channel, Receiver, Sender};
+
+type Data = Box<Vec<u8>>;
 
 /// `Event` is an enum that offers various type of events that will be 
 /// handled by an mp2c carousel.
 #[derive(Debug, Clone)]
 pub enum Event {
-  Message(Vec<u8>),
+  Message(Data),
   Terminate,
-}
-
-/// `Store` is a basic circular buffer/ queue implementation backed by
-/// a data vector and a vector of iterable readers. 
-///
-/// An iterable reader is a type that implements `Iterator` and
-/// `Counter`.
-struct Store {
-  size: usize,
-  data: Vec<Event>,
-  tail: usize,
-}
-
-/// `Counter` indicates the index till where a consumer has polled
-/// the Store
-trait Counter {
-  fn count(&self) -> usize;
 }
 
 /// `Consumer` enables to implement handling logic for a vector of bytes.
@@ -36,153 +21,119 @@ pub trait Consumer {
 /// the encapsulating `Consumer` for each `Event`.
 ///
 /// counts the number of `Event`s processed by each poller.
-struct Poller<T: Consumer> {
-  count: usize,
-  consumer: T,
-  rx: Receiver<Event>,
+struct Poller {
+  thread: Option<thread::JoinHandle<()>>,
 }
 
-impl<T: Consumer> Counter for Poller<T> {
-  fn count(&self) -> usize {
-    self.count
-  }
-}
+impl Poller {
 
-impl<T: Consumer> Poller<T> {
-  fn start(&mut self) {
-    //@TODO: implement me.
-
-    loop {
-      let event = self.rx.recv().unwrap();
-
-      match event {
-        Event::Message(data) => {
-          self.consumer.consume(data);
-          self.count += 1;
+  fn new<T: ?Sized>(consumer: Box<T>,rx: sync::Arc<sync::Mutex<mpsc::Receiver<Event>>>) -> Poller 
+    where
+      T: Consumer + Send + 'static  
+  {
+    let thread = thread::spawn(move || loop {
+      match rx.lock().unwrap().recv() {
+        Ok(event) => {
+          match event {
+            Event::Message(data) => {
+              let data = data.clone();
+              consumer.consume(*data);
+            }
+            Event::Terminate => {
+              break;
+            }
+          }     
         },
-        _ => (),
-      }
-    }
-  }
-}
-
-/// `Carousel` is the core data structure that represents a multi-producer multi-polling consumer
-/// async `Event` delivery system.
-pub struct Carousel<T: Consumer> {
-  store: Store,
-  pollers: Vec<Poller<T>>,
-  tx: Sender<Event>,
-  rx: Receiver<Event>,
-  consumer_txs: Vec<Sender<Event>>
-}
-
-impl<T: Consumer + Send + 'static> Carousel<T>{
-
-  pub fn new(size: usize, consumers: Vec<T>) -> Self {
-    let mut consumer_txs = Vec::<Sender<Event>>::new();
-
-    let pollers: Vec<Poller<T>> = consumers.into_iter().
-        map(|consumer| {
-          let (tx, rx) = channel::<Event>();
-
-          consumer_txs.push(tx);
-
-          let mut p = Poller{count: 0, consumer, rx};
-
-          p.start();
-
-          p
-        }).
-        collect();
-
-    let store = Store {
-      size,
-      data: Vec::<Event>::with_capacity(size),
-      tail: 0,
-    };
-
-    let (tx, rx) = channel::<Event>();
-
-    let mut c = Carousel {
-      store,
-      pollers,
-      tx,
-      rx,
-      consumer_txs,
-    };
-
-    c.start();
-
-    c
-  }
-
-  fn start(&mut self) {
-    thread::spawn(|| {
-      loop {
-        let e = self.rx.recv().unwrap();
-
-        self.add(e);
-
-        self.consumer_txs.into_iter().for_each(|tx| {
-          let ce = e.clone();
-          tx.send(ce).unwrap();
-        });
+        Err(e) => println!("Poller error receiving an event: {}", e),
       }
     });
-  }
 
-  /// Returns the head of this ring buffer.
-  fn head(&self) -> usize {
-    self.pollers.iter().map(|x| x.count()).min().unwrap_or(0)
-  }
-
-  /// Returns if the ring buffer is empty or not.
-  fn is_empty(&self) -> bool {
-    self.store.tail == self.head()
-  }
-
-  /// Returns if the ring buffer is full or not.
-  fn is_full(&self) -> bool {
-    (self.store.tail % self.store.size) + 1 == self.head()
-  }
-
-  fn add(&mut self, event: Event) -> Result<(), String> {
-    if self.is_full() {
-      return Err(String::from("waiting for readers to finish reading"));
+    Poller {
+      thread: Some(thread),
     }
-    self.store.data[self.store.tail] = event;
-    self.store.tail = (self.store.tail + 1) % self.store.size;
+  }
+}
 
-    Ok(())
+struct Carousel {
+  pollers: Vec<Poller>,
+  tx: mpsc::Sender<Event>,
+}
+
+impl Carousel {
+
+  fn new<T: ?Sized>(consumers: Vec<Box<T>>) -> Carousel
+    where 
+      T: Consumer + Send + 'static 
+  {
+    assert!(consumers.len() > 0);
+
+    let (tx, rx) = mpsc::channel::<Event>();
+
+    let rx = sync::Arc::new(sync::Mutex::new(rx));
+
+    let pollers: Vec<Poller> = consumers.into_iter().map(|c| Poller::new(c, sync::Arc::clone(&rx))).collect();
+    
+    Carousel {
+      pollers,
+      tx,
+    }
   }
 
-  /// Queues an item on the carousel to be polled by the consumers.
-  pub fn queue(&self, event: Event) -> Result<(), String> {
-    return match self.tx.send(event) {
-      Err(e) => Err(String::from(e.to_string())),
-      _ => Ok(()),
-    }
+  fn put(&self, data: Vec<u8>) {
+    let data = Box::new(data);
+    let event = Event::Message(data);
+    self.tx.send(event).unwrap();
+  }
+}
+
+impl Drop for Carousel {
+  fn drop(&mut self) {
+      println!("Sending terminate message to all pollers.");
+
+      for _ in &self.pollers {
+          self.tx.send(Event::Terminate).unwrap();
+      }
+
+      println!("Shutting down all pollers.");
+
+      for poller in &mut self.pollers {
+          if let Some(thread) = poller.thread.take() {
+              thread.join().unwrap();
+          }
+      }
   }
 }
 
 #[cfg(test)]
 mod tests {
-  use crate::mp2c::{Consumer, Carousel, Event};
+  use crate::mp2c::{Consumer, Carousel};
 
-  struct TestConsumer {
+  struct TestConsumer1;
 
-  }
-
-  impl Consumer for TestConsumer {
+  impl Consumer for TestConsumer1 {
     fn consume(&self, data: Vec<u8>) {
-      println!("{}",String::from_utf8(data).unwrap());
+      println!("Test consumer1: {}",String::from_utf8(data).unwrap());
     }
   }
 
+  struct TestConsumer2;
+
+  impl Consumer for TestConsumer2 {
+    fn consume(&self, data: Vec<u8>) {
+      println!("Test consumer2: {}",String::from_utf8(data).unwrap());
+    }
+  }
+
+
   #[test]
   fn basic() {
-    let c = Carousel::new(5, vec![TestConsumer{}]);
+    let mut v: Vec<Box<dyn Consumer + Send + 'static>> = Vec::new();
+    v.push(Box::new(TestConsumer1));
+    v.push(Box::new(TestConsumer2));
+    let c = Carousel::new(v);
 
-    c.queue(Event::Message(String::from("test").into_bytes())).unwrap();
+    c.put(String::from("test").into_bytes());
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
   }
 }
