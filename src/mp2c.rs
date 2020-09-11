@@ -54,14 +54,60 @@ impl Poller {
   }
 }
 
-struct Carousel {
+struct Multipier {
   pollers: Vec<Poller>,
-  tx: mpsc::Sender<Event>,
+  thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Multipier {
+  fn new<T: ?Sized>(consumers: Vec<Box<T>>,rx: sync::Arc<sync::Mutex<mpsc::Receiver<Event>>>) -> Multipier 
+    where
+      T: Consumer + Send + 'static  
+  {
+    let mut multiplier_txs: Vec<mpsc::Sender<Event>> = Vec::with_capacity(consumers.len());
+
+    let pollers: Vec<Poller> = consumers.into_iter().map(|c| {
+      let (ctx, crx) = mpsc::channel::<Event>();
+
+      let crx = sync::Arc::new(sync::Mutex::new(crx));
+
+      multiplier_txs.push(ctx);
+
+      Poller::new(c, sync::Arc::clone(&crx))
+    }).collect();
+
+    let thread = thread::spawn(move || {    
+      loop {
+        let cloned = multiplier_txs.clone();
+        match rx.lock().unwrap().recv() {
+          Ok(event) => {              
+            cloned.into_iter().for_each(|tx| {
+              tx.send(event.clone()).unwrap();
+            });
+            if let Event::Terminate = event {
+              break;
+            }              
+          },
+          Err(e) => println!("Multiplier error receiving an event: {}", e),
+        }
+      }
+    });
+
+    Multipier {
+      pollers,
+      thread: Some(thread),
+    }
+  }
+}
+
+pub struct Carousel {
+  tx: mpsc::Sender<Event>,  
+  multiplier: Multipier,
 }
 
 impl Carousel {
 
-  fn new<T: ?Sized>(consumers: Vec<Box<T>>) -> Carousel
+  pub fn new<T: ?Sized>(consumers: Vec<Box<T>>) -> Carousel
     where 
       T: Consumer + Send + 'static 
   {
@@ -71,15 +117,15 @@ impl Carousel {
 
     let rx = sync::Arc::new(sync::Mutex::new(rx));
 
-    let pollers: Vec<Poller> = consumers.into_iter().map(|c| Poller::new(c, sync::Arc::clone(&rx))).collect();
+    let multiplier = Multipier::new(consumers, rx);
     
     Carousel {
-      pollers,
       tx,
+      multiplier,
     }
   }
 
-  fn put(&self, data: Vec<u8>) {
+  pub fn put(&self, data: Vec<u8>) {
     let data = Box::new(data);
     let event = Event::Message(data);
     self.tx.send(event).unwrap();
@@ -90,13 +136,15 @@ impl Drop for Carousel {
   fn drop(&mut self) {
       println!("Sending terminate message to all pollers.");
 
-      for _ in &self.pollers {
-          self.tx.send(Event::Terminate).unwrap();
+      self.tx.send(Event::Terminate).unwrap();
+
+      if let Some(multiplier_thread) = self.multiplier.thread.take() {
+        multiplier_thread.join().unwrap();
       }
 
       println!("Shutting down all pollers.");
 
-      for poller in &mut self.pollers {
+      for poller in &mut self.multiplier.pollers {
           if let Some(thread) = poller.thread.take() {
               thread.join().unwrap();
           }
@@ -108,30 +156,32 @@ impl Drop for Carousel {
 mod tests {
   use crate::mp2c::{Consumer, Carousel};
 
-  struct TestConsumer1;
-
-  impl Consumer for TestConsumer1 {
-    fn consume(&self, data: Vec<u8>) {
-      println!("Test consumer1: {}",String::from_utf8(data).unwrap());
-    }
-  }
-
-  struct TestConsumer2;
-
-  impl Consumer for TestConsumer2 {
-    fn consume(&self, data: Vec<u8>) {
-      println!("Test consumer2: {}",String::from_utf8(data).unwrap());
-    }
-  }
-
-
   #[test]
   fn basic() {
+    struct TestConsumer1;
+
+    impl Consumer for TestConsumer1 {
+      fn consume(&self, data: Vec<u8>) {
+        assert_eq!(String::from_utf8(data).unwrap(), String::from("test"));
+      }
+    }
+  
+    struct TestConsumer2;
+  
+    impl Consumer for TestConsumer2 {
+      fn consume(&self, data: Vec<u8>) {
+        assert_eq!(String::from_utf8(data).unwrap(), String::from("test"));
+      }
+    }
+
     let mut v: Vec<Box<dyn Consumer + Send + 'static>> = Vec::new();
     v.push(Box::new(TestConsumer1));
     v.push(Box::new(TestConsumer2));
     let c = Carousel::new(v);
 
+    c.put(String::from("test").into_bytes());
+    c.put(String::from("test").into_bytes());
+    c.put(String::from("test").into_bytes());
     c.put(String::from("test").into_bytes());
 
     std::thread::sleep(std::time::Duration::from_secs(2));
