@@ -4,4 +4,4 @@
 //! multiple producers to send messages to multiple consumers
 //! completely asynchronously.
 
-pub mod mp2c;
+pub mod asynch;
