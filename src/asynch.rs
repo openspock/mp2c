@@ -149,9 +149,10 @@ impl Multipier {
 /// c.put(String::from("test").into_bytes());
 /// 
 /// ```
+
 pub struct Carousel {
   tx: mpsc::Sender<Event>,  
-  multiplier: Multipier,
+  multiplier: Option<Multipier>,
 }
 
 impl Carousel {
@@ -171,7 +172,7 @@ impl Carousel {
     
     Carousel {
       tx,
-      multiplier,
+      multiplier: Some(multiplier),
     }
   }
 
@@ -184,22 +185,33 @@ impl Carousel {
   }
 }
 
+impl Clone for Carousel {
+  fn clone(&self) -> Self {
+    Carousel {
+      tx: self.tx.clone(),
+      multiplier: Option::None,
+    }
+  }
+}
+
 impl Drop for Carousel {
   fn drop(&mut self) {
-      println!("Sending terminate message to all pollers.");
+      if let Some(multiplier) = &mut self.multiplier {
+        println!("Sending terminate message to all pollers.");
 
-      self.tx.send(Event::Terminate).unwrap();
+        self.tx.send(Event::Terminate).unwrap();
 
-      if let Some(multiplier_thread) = self.multiplier.thread.take() {
-        multiplier_thread.join().unwrap();
-      }
+        if let Some(multiplier_thread) = multiplier.thread.take() {
+          multiplier_thread.join().unwrap();
+        }
 
-      println!("Shutting down all pollers.");
-
-      for poller in &mut self.multiplier.pollers {
-          if let Some(thread) = poller.thread.take() {
-              thread.join().unwrap();
-          }
+        println!("Shutting down all pollers.");
+    
+        for poller in &mut multiplier.pollers {
+            if let Some(thread) = poller.thread.take() {
+                thread.join().unwrap();
+            }
+        }
       }
   }
 }
@@ -238,4 +250,37 @@ mod tests {
 
     std::thread::sleep(std::time::Duration::from_secs(2));
   }
+
+  #[test]
+  fn multi_producer() {
+    struct TestConsumer1;
+
+    impl Consumer for TestConsumer1 {
+      fn consume(&self, data: Vec<u8>) {
+        assert_eq!(String::from_utf8(data).unwrap(), String::from("test"));
+      }
+    }
+  
+    struct TestConsumer2;
+  
+    impl Consumer for TestConsumer2 {
+      fn consume(&self, data: Vec<u8>) {
+        assert_eq!(String::from_utf8(data).unwrap(), String::from("test"));
+      }
+    }
+
+    let mut v: Vec<Box<dyn Consumer + Send + 'static>> = Vec::new();
+    v.push(Box::new(TestConsumer1));
+    v.push(Box::new(TestConsumer2));
+    let c = Carousel::new(v);
+
+    for _ in 1..10 {
+      let cloned_c = c.clone();
+      let t = std::thread::spawn(move || {
+        cloned_c.put(String::from("test").into_bytes());
+      });
+
+      t.join().unwrap();
+    }
+  }  
 }
