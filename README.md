@@ -57,3 +57,16 @@ Yes. In the spirit of don't communicate by sharing memory, share memory by commu
    t.join().unwrap();
  }
 ```
+
+# What's next?
+
+## Message id
+Add a message id to each message being put on the data carousel.
+
+# Release history
+
+## v0.1.1
+Updated README with example.
+
+## v0.1.0
+Initial release.
