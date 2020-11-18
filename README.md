@@ -28,7 +28,7 @@ Yes. In the spirit of don't communicate by sharing memory, share memory by commu
  struct TestConsumer1;
 
  impl Consumer for TestConsumer1 {
-   fn consume(&self, data: Vec<u8>) {
+   fn consume(&mut self, data: Vec<u8>) {
      let msg = String::from_utf8(data).unwrap();
      // do something with msg
    }
@@ -37,7 +37,7 @@ Yes. In the spirit of don't communicate by sharing memory, share memory by commu
  struct TestConsumer2;
 
  impl Consumer for TestConsumer2 {
-  fn consume(&self, data: Vec<u8>) {
+  fn consume(&mut self, data: Vec<u8>) {
     let msg = String::from_utf8(data).unwrap();
     // do something with msg   
   }
@@ -64,6 +64,9 @@ Yes. In the spirit of don't communicate by sharing memory, share memory by commu
 Add a message id to each message being put on the data carousel.
 
 # Release history
+
+## v0.1.2
+Make consumer mutable
 
 ## v0.1.1
 Updated README with example.
