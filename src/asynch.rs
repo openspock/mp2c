@@ -17,7 +17,7 @@ enum Event {
 /// Each consumer which would like to receive a message should implement
 /// this trait.
 pub trait Consumer {
-    fn consume(&self, data: Vec<u8>);
+    fn consume(&mut self, data: Vec<u8>);
 }
 
 /// `Poller` is a simple struct that encapsulates a polling thread that calls
@@ -31,6 +31,7 @@ impl Poller {
     where
         T: Consumer + Send + 'static,
     {
+        let mut consumer = consumer;
         let thread = thread::spawn(move || loop {
             match rx.lock().unwrap().recv() {
                 Ok(event) => match event {
@@ -130,7 +131,7 @@ impl Multipier {
 /// struct TestConsumer1;
 ///
 /// impl Consumer for TestConsumer1 {
-///   fn consume(&self, data: Vec<u8>) {
+///   fn consume(&mut self, data: Vec<u8>) {
 ///     let msg = String::from_utf8(data).unwrap();
 ///     // do something with msg
 ///   }
@@ -139,7 +140,7 @@ impl Multipier {
 /// struct TestConsumer2;
 ///
 /// impl Consumer for TestConsumer2 {
-///  fn consume(&self, data: Vec<u8>) {
+///  fn consume(&mut self, data: Vec<u8>) {
 ///    let msg = String::from_utf8(data).unwrap();
 ///    // do something with msg   
 ///  }
@@ -235,7 +236,7 @@ mod tests {
         struct TestConsumer1;
 
         impl Consumer for TestConsumer1 {
-            fn consume(&self, data: Vec<u8>) {
+            fn consume(&mut self, data: Vec<u8>) {
                 assert_eq!(String::from_utf8(data).unwrap(), String::from("test"));
             }
         }
@@ -243,7 +244,7 @@ mod tests {
         struct TestConsumer2;
 
         impl Consumer for TestConsumer2 {
-            fn consume(&self, data: Vec<u8>) {
+            fn consume(&mut self, data: Vec<u8>) {
                 assert_eq!(String::from_utf8(data).unwrap(), String::from("test"));
             }
         }
@@ -266,7 +267,7 @@ mod tests {
         struct TestConsumer1;
 
         impl Consumer for TestConsumer1 {
-            fn consume(&self, data: Vec<u8>) {
+            fn consume(&mut self, data: Vec<u8>) {
                 assert_eq!(String::from_utf8(data).unwrap(), String::from("test"));
             }
         }
@@ -274,7 +275,7 @@ mod tests {
         struct TestConsumer2;
 
         impl Consumer for TestConsumer2 {
-            fn consume(&self, data: Vec<u8>) {
+            fn consume(&mut self, data: Vec<u8>) {
                 assert_eq!(String::from_utf8(data).unwrap(), String::from("test"));
             }
         }
